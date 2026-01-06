@@ -1,0 +1,58 @@
+---
+title: "Reference single cell RNA-seq data"
+subtitle: " "
+date: last-modified
+format:
+  gfm:
+    embed-resources: true
+---
+
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(qs2)
+
+
+## xenium referece data
+xenium <- qs_read("/Users/arbones/Dropbox/SyncBriefcase/LAB/UK/Xenium/ARIA_Akhil/aria/data/20251115-aria_processed.qs2")
+### Extract genes (features) from xenium data
+feat <- Features(xenium)
+```
+
+There are `r length(feat)` genes in the xenium data.
+
+```{r}
+#####################################################################################
+## single cell RNA-seq data
+load("/Users/arbones/Dropbox/SyncBriefcase/LAB/UK/scRNA_Akhil/Analysis/Seurat/data/20250826-alldata_sctype_annotated_CHLOE_Lance_reintegrated.Rdata")
+
+DefaultAssay(aria) <- "RNA"
+### some cleaning
+aria@graphs <- list()
+aria@reductions <- list()
+aria[["integrated"]] <- NULL
+aria[["SCT"]] <- NULL
+aria <- JoinLayers(aria)
+
+```
+```{r}
+
+### subset Seurat object to only those genes present in xenium data
+reference_scRNAseq <- subset(aria, features = feat)
+
+```
+
+After subsetting, there are `r nrow(reference_scRNAseq)` genes from the xenium panel in the reference scRNA-seq data.
+
+**Not found in the reference scRNA-seq data are the following genes:**
+```{r}
+paste0(setdiff(feat, rownames(reference_scRNAseq)), collapse = ", ")
+```
+
+
+```{r}
+#| eval: false
+### save reference scRNA-seq data
+qs_save(reference_scRNAseq, "data/reference_scRNAseq.qs2")
+```

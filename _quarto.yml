@@ -1,0 +1,13 @@
+project:
+  type: default
+  output-dir: _output
+execute:
+  message: false
+  warning: false
+  echo: false
+format:
+  gfm:
+    variant: +yaml_metadata_block
+    embed-resources: false
+    fig-format: png
+    fig-dpi: 300

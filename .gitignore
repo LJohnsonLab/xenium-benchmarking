@@ -1,0 +1,11 @@
+.DS_Store
+.quarto
+data/*
+!data/.gitkeep
+/.quarto/
+CLAUDE.md
+.claude/
+.context/
+
+Slide1_resegmented_XeniumRanger/*
+!Slide1_resegmented_XeniumRanger/README.md

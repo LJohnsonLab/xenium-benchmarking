@@ -1,0 +1,204 @@
+---
+title: "Proportion of transcripts assigned to cells"
+subtitle: "Assignment efficiency (Sensitivity) "
+date: last-modified
+---
+
+```{r}
+library(tidyverse)
+library(duckplyr)
+library(ggpubr)
+library(patchwork)
+library(ggrepel)
+library(kableExtra)
+library(compareGroups)
+
+options(scipen = 999)
+```
+
+# Summary of segmentation metrics across expansion conditions
+
+We compared segmentation performance across five nuclear expansion distances: 0, 3, 5, 10, and 20 micrometers. We recursively located all `metrics_summary.csv` files within the Slide1_resegmented_XeniumRanger directory. We read each file and extracted the expansion condition from the directory name. We combined the metrics into a single data frame for comparative analysis.
+
+```{r}
+# List all metrics_summary.csv files across expansion conditions
+  metrics_files <- list.files(
+    path = "Slide1_resegmented_XeniumRanger",
+    pattern = "metrics_summary.csv",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+
+  # Read all CSV files and combine into a single data frame
+  # Extract expansion condition from file path for downstream analysis
+  metrics_combined <- metrics_files |>
+    map_dfr(
+      \(file_path) {
+        read_csv(file_path, show_col_types = FALSE) |>
+        mutate(
+            # Extract expansion condition from directory name (e.g., "expansion3um")
+            expansion_condition = str_extract(file_path, "expansion\\d+um") |> parse_number(),.before = 1)
+      }
+    ) 
+
+    metrics_combined |>
+      arrange(expansion_condition) |>
+      select(expansion_condition,total_cell_area:median_transcripts_per_cell,
+        -estimated_number_of_false_positive_transcripts_per_cell_including_genomic_counts,
+        -adjusted_genomic_control_probe_rate,-ends_with("q20"),
+        -genomic_control_probe_counts_per_control_per_cell,
+         segmented_cell_nuc_expansion_count) |>
+      column_to_rownames("expansion_condition") |>
+      t() |> as.data.frame() |>
+      knitr::kable(digits = 3, caption = "metrics per expansion condition")
+```
+
+We generated a summary table displaying key metrics across all expansion conditions. Cell boundary expansion had a profound effect on transcript assignment. The fraction of transcripts assigned to cells increased from 0.344 at 0 micrometer expansion to 0.985 at 20 micrometer expansion. This represents a 2.9-fold improvement in transcript capture efficiency. Median transcripts per cell increased progressively from 365 at 0 micrometers to 1,068 at 20 micrometers. Similarly, median genes per cell rose from 134 to 217 across the same range. Total cell area expanded dramatically from 16.4 million square micrometers at 0 micrometers to 135.1 million at 20 micrometers. The number of detected cells remained stable at approximately 401,000 across most conditions, with the 5 micrometer expansion detecting 413,608 cells. These results demonstrate that nuclear expansion substantially improves transcript recovery without altering cell counts.
+
+# Default 5um data
+```{r}
+# Read the transcripts parquet file, filter out UNASSIGNED cell IDs,
+# and calculate the number of transcripts and median QV per cell.
+transcripts5um_summary <- read_parquet_duckdb("Slide1_resegmented_XeniumRanger/expansion5um/transcripts.parquet") |>
+  filter(cell_id!="UNASSIGNED") |>
+  summarize(nCount_raw = n(),
+            nFeature_raw = n_distinct(feature_name),
+            median_qv = median(qv, na.rm=TRUE),
+            .by = cell_id) |>
+  collect() # Finally, collect the results into a data frame.
+```
+
+We focused on the default 5 micrometer expansion condition for detailed analysis. We read the transcripts parquet file using DuckDB for efficient processing. We excluded unassigned transcripts to focus on cellular transcript content. We calculated three metrics per cell: total transcript count, number of unique genes detected, and median transcript quality value. We collected the results into a data frame for downstream visualization.
+
+## Summary statistics. 
+
+### Distribution of transcript metrics **per cell** (excluding unassigned transcripts)
+
+```{r}
+gghisto_decoration <- function(var_col) {
+  list(
+    geom_vline(aes(xintercept = median({{ var_col }}, na.rm = TRUE)),
+               color = "black", linetype = "dashed", linewidth = 1),
+    geom_text(
+      data = \(df) df |> summarize(median_val = median({{ var_col }}, na.rm = TRUE)),
+      aes(x = median_val, y = Inf, label = paste("Median:", round(median_val, 1))),
+      vjust = 1.5,
+      hjust = -0.1,
+      color = "black"
+    ),
+    theme_minimal()
+  )
+}
+
+
+pfill = "#ffa866ff"
+pcolor = "#660000" 
+palpha = 0.7
+
+
+# Usage example:
+# transcripts5um_summary |>
+#   filter(cell_id != "UNASSIGNED") |>
+#   ggplot(aes(x = nCount_raw)) +
+#   geom_histogram(binwidth = 100, fill = pfill, color = pcolor, alpha = palpha) +
+#   gghisto_decoration(nCount_raw)
+
+```
+
+
+```{r}
+#| column: page
+#| fig-width: 12
+qv <- transcripts5um_summary |>
+  ggplot(aes(x = median_qv)) +
+  geom_histogram(binwidth = 0.5, fill = pfill, color = pcolor, alpha = palpha) +
+  scale_y_continuous(labels = scales::label_number(scale = 0.001, suffix = "K")) +
+  gghisto_decoration(median_qv) +
+  labs(
+    title = "Distribution of Transcript QV per Cell",
+    x = "Number of Transcripts per Cell",
+    y = "Frequency") 
+
+ncount <- transcripts5um_summary |>
+  ggplot(aes(x = nCount_raw)) +
+  geom_histogram(binwidth = 200, fill = pfill, color = pcolor, alpha = palpha) +
+  scale_y_continuous(labels = scales::label_number(scale = 0.001, suffix = "K")) +
+  scale_x_continuous(labels = scales::label_number(scale = 0.001, suffix = "K")) +
+  gghisto_decoration(nCount_raw) +
+  labs(
+    title = "Distribution of Transcript Counts per Cell",
+    x = "Number of Transcripts per Cell",
+    y = "Frequency") 
+
+
+nfeat <- transcripts5um_summary |>
+  ggplot(aes(x = nFeature_raw)) +
+  geom_histogram(binwidth = 10, fill = pfill, color = pcolor, alpha = palpha) +
+  scale_y_continuous(labels = scales::label_number(scale = 0.001, suffix = "K")) +
+  gghisto_decoration(nFeature_raw) +
+  labs(
+    title = "Distribution of Feature Counts per Cell",
+    x = "Number of Features per Cell",
+    y = "Frequency") 
+
+(qv|ncount|nfeat) + plot_layout(nrow = 1)
+```
+
+We defined a histogram decoration function to add median lines and labels to plots. We created three histograms to visualize the distribution of transcript metrics across cells. The median transcript quality value was 29.2, indicating high decoding confidence for most transcripts. The median transcript count per cell was 955, demonstrating substantial transcript capture in the 5 micrometer expansion condition. The median feature count was 213 genes per cell. These distributions reveal the typical cellular content captured by the default expansion strategy. All three metrics showed right-skewed distributions, with some cells containing considerably more transcripts and genes than the median.
+
+## Relationship between assignment efficiency and nucleus distance **per gene**
+
+Subsample 10 million transcripts to speed up computation.
+```{r}
+## duckplyr does not support random sampling, so we use DBI
+con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+transcripts5um_sql <- DBI::dbGetQuery(
+  con,
+  "SELECT * FROM read_parquet('Slide1_resegmented_XeniumRanger/expansion5um/transcripts.parquet')
+   ORDER BY random()
+   LIMIT 10000000") |>
+    tibble::as_tibble()
+DBI::dbDisconnect(con, shutdown = TRUE)
+```
+
+We subsampled 10 million transcripts from the full dataset to enable rapid computation. We used DBI with DuckDB to execute a SQL query with random ordering and row limiting. This approach bypassed limitations in duckplyr's sampling capabilities. The subsampled dataset provided sufficient statistical power for gene-level analysis while reducing computational burden.
+
+```{r}
+transcript_5m_summary <- transcripts5um_sql |>
+    ##odds ratio of being assigned vs unassigned for each gene
+    filter(!str_starts(feature_name, "NegControl")) |>
+    group_by(feature_name) |>
+    summarize(nCount = n(),
+              nCell = n_distinct(cell_id),
+              median_qv = median(qv, na.rm=TRUE),
+              unasigned = sum(cell_id == "UNASSIGNED")/n()*100,
+              median_nucleus_distance = median(nucleus_distance, na.rm=TRUE))|>
+    arrange(desc(nCount)) |>
+    mutate(gene = ifelse(unasigned>40, feature_name, NA))
+
+```
+
+We calculated gene-level assignment metrics from the subsampled transcripts. We excluded negative control probes to focus on biological genes. We grouped transcripts by gene and computed total transcript count, number of cells containing the gene, median quality value, unassigned percentage, and median nucleus distance. We arranged genes by decreasing transcript abundance. We flagged genes with more than 40% unassigned transcripts for labeling in visualizations. This analysis revealed gene-specific patterns in spatial distribution and assignment efficiency.
+
+```{r}
+# plot metrics
+
+ggplot(transcript_5m_summary, aes(x = unasigned,
+                                y = median_nucleus_distance,
+                                 size=nCount,
+                                 label = gene))+
+    geom_point(alpha = 0.7, shape = 21)+
+    scale_size_continuous(labels = scales::label_number(scale = 0.001 ,suffix = "K" ))+
+    geom_text_repel(max.overlaps = Inf, size =4  )+
+    #stat_smooth(method='lm', se=FALSE, color='red',alpha = 0.5)+
+    labs(x = "Unassigned transcripts (%)",
+         y = "Median nucleus distance (µm)",
+         title = "Assignment efficiency vs Nucleus distance",
+         subtitle = "Each point represents a gene",
+         size = "Number of transcripts")+
+    stat_cor(size=5, p.accuracy = 0.0001, size=7)+
+    theme_minimal()
+
+```
+
+We generated a scatter plot relating unassigned transcript percentage to median nucleus distance for each gene. Each point represents a single gene, sized by total transcript count. We observed a strong positive correlation between nucleus distance and unassignment rate (R = 0.93, p < 0.0001). Genes with transcripts located farther from nuclei showed systematically higher failure rates in cellular assignment. GFAP exhibited the most extreme spatial pattern, with over 40% of its transcripts unassigned and a median nucleus distance exceeding 5 micrometers. ALDOC, MT2, and ABHD17A similarly displayed high unassignment rates coupled with large nucleus distances. These genes likely encode proteins with extensive cytoplasmic functions or exhibit long-range mRNA transport mechanisms. Conversely, genes with transcripts concentrated near nuclei showed minimal unassignment. This gene-specific spatial heterogeneity directly affects which transcripts are recovered by expansion-based segmentation strategies and must be considered when interpreting cell type assignments and differential expression results from Xenium data.

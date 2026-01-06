@@ -1,0 +1,254 @@
+---
+title: "Transfer labels and find doublets in Xenium data"
+subtitle: "Example with 5 um expansion"
+date: last-modified
+format:
+  gfm:
+    embed-resources: false
+---
+
+```{r}
+library(tidyverse)
+library(Seurat)
+library(patchwork)
+library(qs2)
+# library(tictoc)
+library(spacexr)
+library(SpatialExperiment)
+
+# Load Xenium data
+# xenium <-LoadXenium(data.dir = "Slide1_resegmented_XeniumRanger/expansion5um")
+# xenium <- subset(xenium, subset = nCount_Xenium > 0)
+# xenium_small <- subset(xenium, cells = sample(Cells(xenium),50000))
+# qs_save(xenium_small, "data/xenium_slide1_small.qs2")
+# xenium_small <- qs_read("data/xenium_slide1_small.qs2")
+
+xenium_slide1_small_labeled <- qs_read("data/xenium_slide1_small_labeled.qs2")
+```
+
+```{r}
+#|eval: false
+
+### scRNA-seq reference
+load("/Users/arbones/Dropbox/SyncBriefcase/LAB/UK/scRNA_Akhil/Analysis/Seurat/data/20250826-alldata_sctype_annotated_CHLOE_Lance_reintegrated.Rdata")
+
+DefaultAssay(aria) <- "RNA"
+### some cleaning
+aria@graphs <- list()
+aria@reductions <- list()
+aria[["integrated"]] <- NULL
+aria[["SCT"]] <- NULL
+aria <- JoinLayers(aria)
+qs_save(aria, "data/reference_scRNAseq.qs2")
+```
+
+```{r}
+seurat_ref <- qs_read("data/reference_scRNAseq.qs2")
+```
+
+## Label Transfer from scRNA-seq to Xenium
+
+To successfully transfer cell labels from a whole-transcriptome scRNA-seq reference to a targeted We transferred cell type annotations from a whole-transcriptome scRNA-seq reference to a Xenium spatial dataset containing only 480 genes. This posed a methodological challenge. The two platforms share merely 470 genes, severely limiting the feature space available for integration.
+
+We addressed this constraint by using Canonical Correlation Analysis (CCA) rather than PCA for anchor identification (3.RCTD.qmd:54). CCA aligns datasets based on the correlation structure of the specific shared features. This approach does not rely on a pre-computed PCA structure from the reference that might emphasize genes absent in the Xenium panel. We applied SCTransform normalization to both datasets to model the unique noise profiles of spatial transcript counts effectively.
+
+Memory constraints prevented us from running CCA on the entire Xenium dataset. We therefore subsampled 50,000 cells for the anchor-finding step and then transferred the learned mapping to predict labels.
+
+```{r}
+#| eval: false
+
+# Assume 'seurat_ref' is the labeled scRNA-seq reference
+# 1. Identify the common features (genes) present in both datasets
+common_features <- intersect(rownames(seurat_ref), rownames(xenium_small))
+####################################################################
+# 2. Normalize both objects using SCTransform 
+
+# 2.1. Define the specific assay names for each object
+# The reference likely uses 'RNA', while Xenium uses 'Xenium'
+assay_names <- list(ref = "RNA", query = "Xenium")
+
+tic()
+# 2.2. Use map2 to pass both the object and its assay name to SCTransform
+sct_list <- list(ref = seurat_ref, query = xenium_small) |> 
+  map2(assay_names, \(obj, assay_name) {
+    obj |> 
+      SCTransform(assay = assay_name, verbose = FALSE)})
+toc()
+
+
+# 3. Find transfer anchors using ONLY the common features
+# We use 'cca' reduction which is robust for cross-platform integration with limited features
+tic()
+anchors <- FindTransferAnchors(
+  reference = sct_list$ref,
+  query = sct_list$query,
+  normalization.method = "SCT",
+  features = common_features,
+  reduction = "cca", 
+  verbose = FALSE)
+toc()
+
+# qs_save(anchors, "data/xenium_slide1_small_transfer_anchors.qs2")
+####################################################################
+# 4. Transfer the cell type labels
+
+anchors <- qs_read("data/xenium_slide1_small_transfer_anchors.qs2")
+
+predictions <- TransferData(
+  anchorset = anchors,
+  refdata = sct_list$ref$lance_classification, # Replace 'cell_type' with your annotation column
+  prediction.assay = FALSE,
+  weight.reduction = "cca",      # Use the CCA dimension reduction for weighting
+  verbose = FALSE) |> 
+  as_tibble(rownames = "cell_id")
+
+# 5. Add predictions to the Xenium metadata
+# Add to metadata
+xenium_small_labeled <- AddMetaData(
+  object = xenium_small,
+  metadata = predictions |>
+     column_to_rownames("cell_id"))
+
+qs_save(xenium_small_labeled, "data/xenium_slide1_small_labeled.qs2")
+
+```
+
+### Prediction Quality
+
+Given the limited 480-gene input, the resolution of cell types in the xenium datatset will be lower than in the full reference. The prediction scores can help assess the confidence of the label transfer. `prediction.score.max` is the confidence level (from 0 to 1) for the assigned cell type label. A higher value indicates a more confident prediction.
+
+```{r}
+
+
+# ggplot histogram of prediction scores
+ggplot(xenium_slide1_small_labeled@meta.data, aes(x = prediction.score.max)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Prediction Scores",
+    x = "Prediction Score Max",
+    y = "Number of Cells"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+We observed that broad cell classes transfer more reliably than fine subtypes. The 480-gene panel may contain sufficient markers to distinguish major lineages like astrocytes from neurons but lacks the discriminating features needed to resolve subtle subtypes such as border-associated macrophages (BAMs).
+
+```{r}
+# ggplot histogram of prediction scores per cell type
+ggplot(as_tibble(xenium_slide1_small_labeled@meta.data), aes(x = prediction.score.max)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Prediction Scores",
+    x = "Prediction Score Max",
+    y = "Number of Cells"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )+
+    facet_wrap(~predicted.id, scales = "free")
+```
+
+The spatial distribution plot displays only cells with prediction scores exceeding 0.5. This threshold filters out uncertain assignments and reveals the spatial organization of confidently identified cell types across the tissue.
+
+```{r}
+# 1. Define a confidence threshold
+# Cells with a score below 0.5 are set to NA so they don't appear on the plot
+xenium_slide1_small_labeled$high_conf_label <- ifelse(
+  xenium_slide1_small_labeled$prediction.score.max > 0.5,
+  xenium_slide1_small_labeled$predicted.id,
+  NA
+)
+
+# 2. Generate the spatial plot
+# We group by the new high-confidence label column
+# 'molecules = NULL' ensures we plot only cell centroids, not individual transcripts
+ImageDimPlot(
+  xenium_slide1_small_labeled,
+  fov = "fov",
+  group.by = "high_conf_label",
+  molecules = NULL, 
+  size = 0.75,       # Adjust point size for visibility
+  axes = FALSE,
+  dark.background = FALSE
+) +
+  ggtitle("Spatial Distribution of Predicted Cell Types (Score > 0.5)") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.text = element_text(size = 8)
+  )
+
+```
+
+## Doublet Detection with RCTD
+
+We applied RCTD in doublet mode to deconvolve potential multi-cell aggregates or genuine biological doublets in the segmented Xenium data.
+```{r}
+# Create SummarizedExperiment object for scRNA-seq reference
+reference_sc <- SummarizedExperiment(
+    assays = list(counts = as.matrix(seurat_ref@assays$RNA$counts)),
+    colData = DataFrame(cell_type = seurat_ref$lance_classification))
+
+# Create SpatialExperiment object for Xenium data
+spatial_counts <- as.matrix(xenium_slide1_small_labeled@assays$Xenium$counts)
+spatial_coords <- GetTissueCoordinates(xenium_slide1_small_labeled) |> 
+    select(x,y) |> 
+    mutate(across(everything(), as.numeric)) |> 
+    as.matrix()
+spatial_spe <- SpatialExperiment(
+    assays = list(counts = spatial_counts),
+    spatialCoords = spatial_coords)
+``` 
+
+
+```{r}
+#| eval: false
+
+# Preprocess reference and spatial data for RCTD
+rctd_data <- createRctd(spatial_spe, reference_sc)
+
+# Run RCTD to find doublets and deconvolute cell types
+results_spe <- runRctd(rctd_data, rctd_mode = "doublet", max_cores = 2)
+
+qs_save(results_spe, "data/xenium_slide1_small_RCTD_results_SpatialExperiment.qs2")
+```
+
+## Doublet summary 
+```{r}
+rctd_results <- qs_read("data/xenium_slide1_small_RCTD_results_SpatialExperiment.qs2")
+# Summarize doublet classification results
+
+classification_df <- data.frame(
+    pixel = colnames(assay(rctd_results)),
+    spot_class = colData(rctd_results)$spot_class,
+    first_type = colData(rctd_results)$first_type,
+    second_type = colData(rctd_results)$second_type
+)
+cat("Doublet rate:\n")
+prop.table(table(classification_df$spot_class))*100
+```
+
+## Doublet visualization per cell type
+
+The per-cell-type visualization shows which cell types most frequently appear as doublets. This breakdown helps identify whether certain cell types are systematically affected by segmentation errors or whether specific biological configurations—such as glia-neuron interactions—are being captured as doublets.
+```{r}
+# Visualize percentages of singlets per cell type
+ggplot(classification_df, aes(x = first_type, fill = spot_class)) +
+    geom_bar(position = "fill") +
+    scale_y_continuous(labels = scales::percent) +
+    theme_minimal() +
+    labs(title = "Percentage of Singlets vs Doublets per Cell Type",
+         x = "Cell Type",
+         y = "Percentage",
+         fill = "Spot Class") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    coord_flip()
+
+```
+
+The cell type-specific patterns support a mixed explanation. Ependymal cells, which form epithelial monolayers with clear boundaries, show high singlet rates. Vascular cells and glia, which extend fine processes and intimately contact multiple partners, show high doublet rates. This suggests that segmentation struggles with morphologically complex or closely packed cells.
+
+The high doublet rate in astrocytes and microglia is particularly concerning. These cells have elaborate ramified morphologies that may extend beyond 5 μm, causing overlap with neighboring cells. Alternatively, their transcripts may genuinely co-localize with neurons in synaptic or support regions, reflecting biological interaction zones rather than segmentation errors.
