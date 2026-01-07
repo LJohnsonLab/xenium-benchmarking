@@ -5,6 +5,7 @@ date: last-modified
 format:
   gfm:
     embed-resources: false
+bibliography: references.bib
 ---
 
 ```{r}
@@ -15,6 +16,7 @@ library(qs2)
 # library(tictoc)
 library(spacexr)
 library(SpatialExperiment)
+library(Matrix)
 
 # Load Xenium data
 # xenium <-LoadXenium(data.dir = "Slide1_resegmented_XeniumRanger/expansion5um")
@@ -186,6 +188,7 @@ ImageDimPlot(
 ## Doublet Detection with RCTD
 
 We applied RCTD in doublet mode to deconvolve potential multi-cell aggregates or genuine biological doublets in the segmented Xenium data.
+
 ```{r}
 # Create SummarizedExperiment object for scRNA-seq reference
 reference_sc <- SummarizedExperiment(
@@ -201,8 +204,9 @@ spatial_coords <- GetTissueCoordinates(xenium_slide1_small_labeled) |>
 spatial_spe <- SpatialExperiment(
     assays = list(counts = spatial_counts),
     spatialCoords = spatial_coords)
-``` 
 
+spatial_spe$predicted.id <- xenium_slide1_small_labeled$predicted.id
+```
 
 ```{r}
 #| eval: false
@@ -216,7 +220,8 @@ results_spe <- runRctd(rctd_data, rctd_mode = "doublet", max_cores = 2)
 qs_save(results_spe, "data/xenium_slide1_small_RCTD_results_SpatialExperiment.qs2")
 ```
 
-## Doublet summary 
+### Doublet summary
+
 ```{r}
 rctd_results <- qs_read("data/xenium_slide1_small_RCTD_results_SpatialExperiment.qs2")
 # Summarize doublet classification results
@@ -231,9 +236,10 @@ cat("Doublet rate:\n")
 prop.table(table(classification_df$spot_class))*100
 ```
 
-## Doublet visualization per cell type
+### Doublet visualization per cell type
 
 The per-cell-type visualization shows which cell types most frequently appear as doublets. This breakdown helps identify whether certain cell types are systematically affected by segmentation errors or whether specific biological configurations—such as glia-neuron interactions—are being captured as doublets.
+
 ```{r}
 # Visualize percentages of singlets per cell type
 ggplot(classification_df, aes(x = first_type, fill = spot_class)) +
@@ -252,3 +258,325 @@ ggplot(classification_df, aes(x = first_type, fill = spot_class)) +
 The cell type-specific patterns support a mixed explanation. Ependymal cells, which form epithelial monolayers with clear boundaries, show high singlet rates. Vascular cells and glia, which extend fine processes and intimately contact multiple partners, show high doublet rates. This suggests that segmentation struggles with morphologically complex or closely packed cells.
 
 The high doublet rate in astrocytes and microglia is particularly concerning. These cells have elaborate ramified morphologies that may extend beyond 5 μm, causing overlap with neighboring cells. Alternatively, their transcripts may genuinely co-localize with neurons in synaptic or support regions, reflecting biological interaction zones rather than segmentation errors.
+
+# Negative Marker Purity (NMP)
+
+NMP assesses the specificity of in situ cell typing. It operates on the premise that genes not expressed in a specific cell type in the single-cell reference should not appear in that cell type in the spatial dataset [@marcosalas2025].
+
+* **Purpose**: It assesses the "cleanliness" of a segmentation strategy by identifying the percentage of detected reads that appear in cell types where they are biologically expected to be absent.
+* **Negative Markers**: These are defined as genes expressed in less than 0.5% of cells in a specific "negative cell type" according to a high-quality single-cell RNA-seq reference.
+* **Normalization**: To ensure the metric is independent of varying cell-type proportions, mean gene expressions are normalized by the sum of mean expressions across all cell types in the dataset.
+* **Scoring**: The final score measures the reduction in signal purity in the spatial data compared to the scRNA-seq reference. Values are typically scaled such that 1 represents maximum purity and 0 corresponds to a random permutation of cell-type assignments.
+
+```{r}
+# Function to calculate Negative Marker Purity (NMP) scaled score
+# Adapted from Python implementation in:
+# https://github.com/Moldia/Xenium_benchmarking/blob/main/notebooks/5_segmentation_benchmark/metrics.py
+
+
+calculate_nmp_scaled <- function(ref_sce, 
+                                 spatial_spe, 
+                                 ref_celltype_col, 
+                                 spatial_celltype_col, 
+                                 ref_assay_name = "counts",       
+                                 spatial_assay_name = "counts",   
+                                 min_cells = 10,
+                                 neg_threshold = 0.005,
+                                 n_perms = 20,
+                                 seed = 123) {
+  
+  # --- 1. Robust Data Extraction Helper ---
+  get_assay_data <- function(obj, preferred_name, obj_label) {
+    
+    # Check if object is valid
+    if (!is(obj, "SummarizedExperiment")) {
+      stop(sprintf("Input '%s' must be a SummarizedExperiment or SpatialExperiment object.", obj_label))
+    }
+    
+    # Get available assay names
+    avail_assays <- assayNames(obj)
+    
+    # Case A: The requested name exists
+    if (preferred_name %in% avail_assays) {
+      return(assay(obj, preferred_name))
+    }
+    
+    # Case B: The requested name is missing, but we can fallback to the first assay
+    if (length(avail_assays) > 0) {
+      fallback_name <- avail_assays[1]
+      # If names are empty strings (common in some objects), use index 1
+      if (fallback_name == "") fallback_name <- "Index 1"
+      
+      warning(sprintf(
+        "For '%s', assay '%s' was not found. Available assays: [%s]. \nFalling back to using the first available assay: '%s'.", 
+        obj_label, preferred_name, paste(avail_assays, collapse = ", "), fallback_name
+      ))
+      return(assay(obj, 1))
+    }
+    
+    # Case C: No assays exist
+    stop(sprintf("The object '%s' contains no assays (assayNames are empty).", obj_label))
+  }
+
+  # --- Extract Matrices using the new arguments ---
+  ref_mat_full <- get_assay_data(ref_sce, ref_assay_name, "Reference")
+  sp_mat_full  <- get_assay_data(spatial_spe, spatial_assay_name, "Spatial")
+  
+  # --- Rest of the Logic (Identical to before) ---
+  
+  # Align features
+  common_genes <- intersect(rownames(ref_mat_full), rownames(sp_mat_full))
+  if (length(common_genes) == 0) stop("No common genes found between datasets.")
+  
+  ref_mat <- ref_mat_full[common_genes, , drop = FALSE]
+  sp_mat  <- sp_mat_full[common_genes, , drop = FALSE]
+  
+  # Extract metadata
+  if (!ref_celltype_col %in% colnames(colData(ref_sce))) stop(paste("Reference column", ref_celltype_col, "not found."))
+  if (!spatial_celltype_col %in% colnames(colData(spatial_spe))) stop(paste("Spatial column", spatial_celltype_col, "not found."))
+  
+  ref_labels <- colData(ref_sce)[[ref_celltype_col]]
+  sp_labels_raw <- colData(spatial_spe)[[spatial_celltype_col]]
+  
+  # Filter Shared Types
+  ref_counts <- table(ref_labels)
+  sp_counts <- table(sp_labels_raw)
+  
+  shared_types <- intersect(names(ref_counts), names(sp_counts))
+  valid_types <- shared_types[ref_counts[shared_types] >= min_cells & 
+                              sp_counts[shared_types] >= min_cells]
+  
+  if (length(valid_types) < 2) {
+    warning("Fewer than 2 valid shared cell types found. Returning NA.")
+    return(NA_real_)
+  }
+  
+  # Subset to valid types
+  ref_valid_idx <- ref_labels %in% valid_types
+  sp_valid_idx <- sp_labels_raw %in% valid_types
+  
+  ref_mat <- ref_mat[, ref_valid_idx, drop = FALSE]
+  ref_labels <- ref_labels[ref_valid_idx]
+  
+  sp_mat <- sp_mat[, sp_valid_idx, drop = FALSE]
+  sp_labels_real <- sp_labels_raw[sp_valid_idx]
+  
+  # Reference Statistics
+  get_means <- function(mat, labels, types) {
+    vapply(types, function(ct) {
+      cells <- which(labels == ct)
+      if (length(cells) == 0) return(rep(0, nrow(mat)))
+      Matrix::rowMeans(mat[, cells, drop = FALSE])
+    }, numeric(nrow(mat)))
+  }
+  
+  means_ref <- get_means(ref_mat, ref_labels, valid_types)
+  
+  # Normalize Reference
+  mean_of_means_ref <- rowMeans(means_ref)
+  means_ref_rel <- means_ref / ifelse(mean_of_means_ref == 0, 1, mean_of_means_ref)
+  
+  sum_means_ref <- rowSums(means_ref)
+  means_ref_norm <- means_ref / ifelse(sum_means_ref == 0, 1, sum_means_ref)
+  
+  # Identify Negative Markers
+  neg_mask <- means_ref_rel < neg_threshold
+  
+  if (sum(neg_mask) < 1) {
+    warning("No negative markers identified in reference.")
+    return(NA_real_)
+  }
+  
+  mean_sc_lowexp <- mean(means_ref_norm[neg_mask], na.rm = TRUE)
+  
+  # Core NMP Function
+  calc_raw_nmp <- function(current_labels) {
+    means_sp <- get_means(sp_mat, current_labels, valid_types)
+    sum_means_sp <- rowSums(means_sp)
+    means_sp_norm <- means_sp / ifelse(sum_means_sp == 0, 1, sum_means_sp)
+    mean_sp_lowexp <- mean(means_sp_norm[neg_mask], na.rm = TRUE)
+    
+    nmp <- 1
+    if (mean_sp_lowexp > mean_sc_lowexp) {
+      nmp <- nmp - (mean_sp_lowexp - mean_sc_lowexp)
+    }
+    return(nmp)
+  }
+  
+  # Compute Scores
+  nmp_raw <- calc_raw_nmp(sp_labels_real)
+  
+  set.seed(seed)
+  perm_scores <- map_dbl(1:n_perms, function(i) {
+    shuffled_labels <- sample(sp_labels_real)
+    calc_raw_nmp(shuffled_labels)
+  })
+  
+  mean_perm <- mean(perm_scores, na.rm = TRUE)
+  nmp_scaled <- (nmp_raw - mean_perm) / (1 - mean_perm)
+  
+  return(list(
+    NMP_raw = nmp_raw,
+    NMP_perm_mean = mean_perm,
+    NMP_scaled = nmp_scaled
+  ))
+}
+```
+
+```{r}
+# Calculate NMP 
+
+
+npm <- calculate_nmp_scaled (ref_sce = as(reference_sc,"SingleCellExperiment"),  
+                      spatial_spe = spatial_spe, 
+                      ref_celltype_col = "cell_type", 
+                      spatial_celltype_col = "predicted.id", 
+                      ref_assay_name = "counts",       
+                      spatial_assay_name = "counts",
+                      min_cells = 10,
+                      neg_threshold = 0.005,
+                      n_perms = 20,
+                      seed = 123)
+knitr::kable(as_tibble(npm), digits = 3,
+  caption = "Negative Marker Purity (NMP) Scores")
+
+```
+
+* The **`NMP_raw` (0.952)** represents the unadjusted specificity of the dataset. However, this number is deceptive in isolation because it does not account for the inherent sparsity of the data. If the negative markers are rare across the entire tissue, even a random assignment of cell types would result in a high "purity" score simply because those transcripts are unlikely to be found in any cell by chance.
+
+* The **`NMP_perm_mean` (0.917)** confirms this hypothesis. This value is the purity score obtained when the cell-type labels are randomly shuffled 20 times. A random baseline of 0.917 is exceptionally high, indicating that the "negative markers" are very sparse in the spatial dataset overall. Consequently, it is difficult *not* to get a high purity score, even with random guessing.
+
+* The **`NMP_scaled` (0.423)** is the true performance metric. It normalizes your raw score against that high random baseline using the formula . A score of 0.423 means that your segmentation and cell typing strategy recovered only about 42% of the possible signal above random chance. In the context of the paper optimized segmentation strategies often yield NMP scores between 0.6 and 0.8, a score of 0.42 suggests that "leakage" is still occurring or that the segmentation boundaries may need refinement to better capture the true biological signal distinctive from the background.
+
+```{r}
+
+calculate_nmp_by_celltype <- function(ref_sce, 
+                                      spatial_spe, 
+                                      ref_celltype_col, 
+                                      spatial_celltype_col, 
+                                      ref_assay_name = "counts",
+                                      spatial_assay_name = "counts",
+                                      min_cells = 10, 
+                                      neg_threshold = 0.005) {
+  
+  # --- 1. Robust Data Extraction Helper (Identical to Global Function) ---
+  get_assay_data <- function(obj, preferred_name, obj_label) {
+    if (!is(obj, "SummarizedExperiment")) {
+      stop(sprintf("Input '%s' must be a SummarizedExperiment or SpatialExperiment object.", obj_label))
+    }
+    avail_assays <- assayNames(obj)
+    if (preferred_name %in% avail_assays) {
+      return(assay(obj, preferred_name))
+    }
+    if (length(avail_assays) > 0) {
+      fallback_name <- avail_assays[1]
+      if (fallback_name == "") fallback_name <- "Index 1"
+      warning(sprintf(
+        "For '%s', assay '%s' was not found. Using first available assay: '%s'.", 
+        obj_label, preferred_name, fallback_name
+      ))
+      return(assay(obj, 1))
+    }
+    stop(sprintf("The object '%s' contains no assays.", obj_label))
+  }
+
+  # --- 2. Alignment & Filtering ---
+  ref_mat_full <- get_assay_data(ref_sce, ref_assay_name, "Reference")
+  sp_mat_full  <- get_assay_data(spatial_spe, spatial_assay_name, "Spatial")
+  
+  common_genes <- intersect(rownames(ref_mat_full), rownames(sp_mat_full))
+  if (length(common_genes) == 0) stop("No common genes found.")
+  
+  ref_labels <- colData(ref_sce)[[ref_celltype_col]]
+  sp_labels  <- colData(spatial_spe)[[spatial_celltype_col]]
+  
+  ref_counts <- table(ref_labels)
+  sp_counts  <- table(sp_labels)
+  valid_types <- intersect(names(ref_counts)[ref_counts >= min_cells],
+                           names(sp_counts)[sp_counts >= min_cells])
+  
+  if (length(valid_types) < 2) stop("Fewer than 2 valid shared cell types.")
+  
+  # Subset Data
+  ref_mat <- ref_mat_full[common_genes, ref_labels %in% valid_types, drop=FALSE]
+  ref_labels <- ref_labels[ref_labels %in% valid_types]
+  
+  sp_mat <- sp_mat_full[common_genes, sp_labels %in% valid_types, drop=FALSE]
+  sp_labels <- sp_labels[sp_labels %in% valid_types]
+  
+  # --- 3. Compute Statistics ---
+  get_group_means <- function(mat, groups, levels) {
+    vapply(levels, function(lvl) {
+      idx <- which(groups == lvl)
+      if (length(idx) == 0) return(numeric(nrow(mat)))
+      Matrix::rowMeans(mat[, idx, drop=FALSE])
+    }, numeric(nrow(mat)))
+  }
+  
+  means_ref <- get_group_means(ref_mat, ref_labels, valid_types)
+  means_sp  <- get_group_means(sp_mat, sp_labels, valid_types)
+  
+  # Normalize Reference (for negative marker ID)
+  means_ref_rel <- means_ref / ifelse(rowMeans(means_ref)==0, 1, rowMeans(means_ref))
+  
+  # Normalize Both (for scoring)
+  means_ref_norm <- means_ref / ifelse(rowSums(means_ref)==0, 1, rowSums(means_ref))
+  means_sp_norm  <- means_sp  / ifelse(rowSums(means_sp)==0,  1, rowSums(means_sp))
+  
+  # --- 4. Identify Contamination ---
+  # Negative Marker Mask
+  neg_mask <- means_ref_rel < neg_threshold
+  
+  # Calculate Excess Spatial Signal (Contamination)
+  diffs <- means_sp_norm - means_ref_norm
+  
+  # Filter: Keep only negative markers, set negatives (cleaner than ref) to 0
+  diffs[!neg_mask] <- NA
+  diffs[diffs < 0] <- 0
+  
+  # Summarize per cell type
+  contamination_per_ct <- colMeans(diffs, na.rm = TRUE)
+  
+  tibble(
+    cell_type = names(contamination_per_ct),
+    nmp_score = 1 - contamination_per_ct
+  ) %>%
+    arrange(nmp_score)
+}
+```
+
+```{r}
+npm_cell <- calculate_nmp_by_celltype (ref_sce = as(reference_sc,"SingleCellExperiment"),  
+                      spatial_spe = spatial_spe, 
+                      ref_celltype_col = "cell_type", 
+                      spatial_celltype_col = "predicted.id",  
+                                      ref_assay_name = "counts",
+                                      spatial_assay_name = "counts",
+                                      min_cells = 10, 
+                                      neg_threshold = 0.005)
+
+knitr::kable(npm_cell, digits = 3, 
+             caption = "Negative Marker Purity (NMP) Scores by Cell Type")
+```
+
+```{r}
+# 2. Plot
+ggplot(npm_cell, aes(x = reorder(cell_type, nmp_score), y = nmp_score)) +
+  geom_segment(aes(xend = cell_type, yend = min(nmp_score, na.rm=TRUE)*0.99), 
+               color = "grey70") +
+  geom_point(aes(color = nmp_score), size = 4) +
+  scale_color_gradient(low = "#D73027", high = "#4575B4") + 
+  coord_flip() +
+  labs(
+    title = "Negative Marker Purity by Cell Type",
+    subtitle = "Lower scores indicate higher contamination",
+    x = NULL,
+    y = "Purity Score",
+    color = "Purity"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    legend.position = "none"
+  )
+```

@@ -36,6 +36,6 @@ We transferred cell type annotations from the scRNA-seq reference to Xenium data
 
 - **High doublet rate indicates segmentation challenges:** RCTD classified only 21.9% of segmented objects as singlets. 62.3% were certain doublets and 14.2% were uncertain doublets, yielding a combined doublet rate exceeding 76%.
 
-- **Cell type-specific patterns reveal biological and technical factors:** 
+- **Low Negative Marker Purity (NPM)** suggesting that “leakage” is still occurring or that the segmentation boundaries may need refinement to better capture the true biological signal
 
 
