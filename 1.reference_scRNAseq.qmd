@@ -1,6 +1,6 @@
 ---
 title: "Reference single cell RNA-seq data"
-subtitle: " "
+subtitle: "10x Mouse Whole Brain Atlas"
 date: last-modified
 format:
   gfm:
@@ -8,51 +8,90 @@ format:
 ---
 
 
+This analysis utilizes a processed single-cell RNA sequencing object derived from the [Allen Mouse Brain Atlas](https://alleninstitute.github.io/abc_atlas_access/notebooks/cluster_annotation_tutorial.html).  
+
 ```{r}
 library(Seurat)
 library(tidyverse)
 library(qs2)
 
+options(scipen = 999, OutDec = ",")
+```
 
+```{r}
+
+
+library(scuttle)
+
+## single cell referece data (with ENSEMBL gene IDs)
+allen <- qs_read("/Users/arbones/Dropbox/SyncBriefcase/LAB/UK/zz-Allen/data/allen10X_down280k_seurat.qs")
+
+## Change names to gene symbols
+
+# 1. Extract current IDs and target Symbols
+# current_ids corresponds to the stable rownames (e.g., NCBI IDs)
+current_ids <- rownames(allen)
+# target_symbols corresponds to the gene_symbol column
+target_symbols <- allen[["RNA"]][["gene_symbol"]]
+
+# 2. Generate the optimized unique name vector
+# This function prefers 'target_symbols', but falls back to 'current_ids'
+# if the symbol is NA, or combines them if the symbol is a duplicate.
+new_gene_names <- uniquifyFeatureNames(
+  ID = current_ids,
+  names = target_symbols$gene_symbol)
+
+# 3. Extract the counts matrix
+counts_matrix <- GetAssayData(allen, assay = "RNA", layer = "counts")
+
+# 4. Assign the scuttle-optimized names to the matrix
+rownames(counts_matrix) <- new_gene_names
+
+# 5. Create the new Seurat Object 
+ref_full <- CreateSeuratObject(
+  counts = counts_matrix,
+  project = "Allen_Reference",
+  meta.data = allen@meta.data)
+
+```
+
+ The dataset is formatted as a Seurat object containing `r ncol(ref_full)` unique cellular samples and `r nrow(ref_full)` gene features. It includes a single RNA assay with a counts layer. *Gene names have changed from ENSEMBL to gene symbols*.
+
+
+
+## Metadata
+
+The hierarchy within the Allen ecosystem—and specifically the Allen Brain Cell (ABC) Atlas—operates on two distinct but interconnected planes: **cellular taxonomy** and **spatial anatomy**. This system, defined by the [Consensus Whole Mouse Brain Taxonomy](https://www.nature.com/articles/s41586-023-06812-z), is organized into four nested levels. At the top is the Class, a broad category often defined by neurotransmitter type (e.g., Glutamatergic, GABAergic, or Non-neuronal). Below this lies the Subclass, which groups cells by major developmental or projection identities (e.g., L5 PT CTX for Layer 5 Pyramidal Tract neurons). [The hierarchy further refines into Supertypes and finally terminates at the Cluster level](https://htmlpreview.github.io/?https://github.com/LJohnsonLab/Allen_mouse/blob/main/hierarchy.html).
+```{r}
+names(ref_full@meta.data)
+```
+
+## Xenium panel
+
+
+```{r}
 ## xenium referece data
 xenium <- qs_read("/Users/arbones/Dropbox/SyncBriefcase/LAB/UK/Xenium/ARIA_Akhil/aria/data/20251115-aria_processed.qs2")
 ### Extract genes (features) from xenium data
-feat <- Features(xenium)
-```
-
-There are `r length(feat)` genes in the xenium data.
-
-```{r}
-#####################################################################################
-## single cell RNA-seq data
-load("/Users/arbones/Dropbox/SyncBriefcase/LAB/UK/scRNA_Akhil/Analysis/Seurat/data/20250826-alldata_sctype_annotated_CHLOE_Lance_reintegrated.Rdata")
-
-DefaultAssay(aria) <- "RNA"
-### some cleaning
-aria@graphs <- list()
-aria@reductions <- list()
-aria[["integrated"]] <- NULL
-aria[["SCT"]] <- NULL
-aria <- JoinLayers(aria)
-
-```
-```{r}
-
+feat_xenium <- Features(xenium)
 ### subset Seurat object to only those genes present in xenium data
-reference_scRNAseq <- subset(aria, features = feat)
+ref_subset <- subset(ref_full, features = feat_xenium)
 
 ```
 
-After subsetting, there are `r nrow(reference_scRNAseq)` genes from the xenium panel in the reference scRNA-seq data.
+With `r length (feat_xenium)` genes.  
+
+After subsetting, there are `r nrow(ref_subset)` genes from the xenium panel in the reference scRNA-seq data.
 
 **Not found in the reference scRNA-seq data are the following genes:**
 ```{r}
-paste0(setdiff(feat, rownames(reference_scRNAseq)), collapse = ", ")
+paste0(setdiff(feat_xenium, rownames(ref_subset)), collapse = ", ")
 ```
 
 
 ```{r}
 #| eval: false
 ### save reference scRNA-seq data
-qs_save(reference_scRNAseq, "data/reference_scRNAseq.qs2")
+qs_save(ref_full, "data/reference_scRNAseq_full.qs")
+qs_save(ref_subset, "data/reference_scRNAseq_subset.qs")
 ```
