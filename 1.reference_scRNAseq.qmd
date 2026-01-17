@@ -7,8 +7,13 @@ format:
     embed-resources: true
 ---
 
+## Single cell reference (*Downsampled from Allen Atlas*)
 
 This analysis utilizes a processed single-cell RNA sequencing object derived from the [Allen Mouse Brain Atlas](https://alleninstitute.github.io/abc_atlas_access/notebooks/cluster_annotation_tutorial.html).  
+
+Briefly, we applied a stratified sampling with constraints to balance representation:
+- Sampling ratio: 1:10 (ceiling division)
+- Per-cluster constraints: min 50 (*unless the original cluster had less than 50 cells*), max 100 cells
 
 ```{r}
 library(Seurat)
@@ -16,10 +21,13 @@ library(tidyverse)
 library(qs2)
 
 options(scipen = 999, OutDec = ",")
+
+ref_full <- qs_read("data/reference_scRNAseq_full.qs")
+
 ```
 
 ```{r}
-
+#| eval: false
 
 library(scuttle)
 
@@ -55,16 +63,75 @@ ref_full <- CreateSeuratObject(
 
 ```
 
- The dataset is formatted as a Seurat object containing `r ncol(ref_full)` unique cellular samples and `r nrow(ref_full)` gene features. It includes a single RNA assay with a counts layer. *Gene names have changed from ENSEMBL to gene symbols*.
+ The dataset is formatted as a Seurat object containing `r ncol(ref_full)` unique cellular samples and `r nrow(ref_full)` gene features. 
+
+- It includes a single RNA assay with a counts layer. *Gene names have changed from ENSEMBL to gene symbols*.
+- Cells keep their full hierarchical taxonomy (class, subclass, supertype, cluster, neurotransmitter type)
 
 
 
-## Metadata
+
+
+
+## Metadata in the full reference dataset
 
 The hierarchy within the Allen ecosystem—and specifically the Allen Brain Cell (ABC) Atlas—operates on two distinct but interconnected planes: **cellular taxonomy** and **spatial anatomy**. This system, defined by the [Consensus Whole Mouse Brain Taxonomy](https://www.nature.com/articles/s41586-023-06812-z), is organized into four nested levels. At the top is the Class, a broad category often defined by neurotransmitter type (e.g., Glutamatergic, GABAergic, or Non-neuronal). Below this lies the Subclass, which groups cells by major developmental or projection identities (e.g., L5 PT CTX for Layer 5 Pyramidal Tract neurons). [The hierarchy further refines into Supertypes and finally terminates at the Cluster level](https://htmlpreview.github.io/?https://github.com/LJohnsonLab/Allen_mouse/blob/main/hierarchy.html).
+
+Hierarchical taxonomy (10 Neurotransmitters → 34 classes → 338 subclasses → 1,201 supertypes → 5,322 clusters)
+
+
+
 ```{r}
-names(ref_full@meta.data)
+xx0 <- read_csv("data/cluster_to_cluster_annotation_membership_pivoted.csv")
+
+xx <- xx0 |> 
+    #mutate(cluster_alias = cluster_alias |> as.character()) |> 
+    mutate(class.n = str_split_i(class,pattern = " ", i =1) ,.before = "class") |> 
+    mutate(subclass.n = str_split_i(subclass,pattern = " ", i =1) ,.before = "subclass") |>
+    mutate(supertype.n = str_split_i(supertype,pattern = " ", i =1) ,.before = "supertype") |>
+    mutate(cluster.n = str_split_i(cluster,pattern = " ", i =1) ,.before = "cluster")
+
+md <- ref_full@meta.data |> 
+    inner_join(xx, by = "cluster_alias") |> 
+    mutate(label = case_when(
+      !is.na(neurotransmitter) ~ neurotransmitter,
+      class.n == "04" ~ "IMN-Glut",
+      class.n == "05" ~ "IMN-GABA",
+      class.n == "14" ~ "HY-Glut",
+      subclass.n == "316" ~ "Bergmann",
+      subclass.n %in% c("317","318","319","320") ~ "Astrocyte",
+      subclass.n == "321"  ~ "Astroependymal",
+      subclass.n == "322"  ~ "Tanycyte",
+      subclass.n == "323" ~ "Ependymal",
+      subclass.n == "324" ~ "Hypendymal",
+      subclass.n == "325" ~ "CHOR",
+      subclass.n == "326" ~ "OPC",
+      subclass.n == "327" ~ "Oligo",
+      subclass.n == "328" ~ "OEC",
+      subclass.n == "329" ~ "ABC",
+      subclass.n == "330" ~ "VLMC",
+      subclass.n == "331" ~ "Peri",
+      subclass.n == "332" ~ "SMC",
+      subclass.n == "333" ~ "Endo",
+      subclass.n == "334" ~ "Microglia",
+      subclass.n == "335" ~ "BAM",
+      subclass.n == "336" ~ "Monocytes",
+      subclass.n == "337" ~ "DC",
+      supertype.n == "1199" ~ "ILC",
+      supertype.n == "1201" ~ "T-cell",
+      supertype.n == "1200" ~ "NK-cell",
+      supertype.n == "1198" ~ "B-cell"))
+
+ md |> 
+    group_by(neurotransmitter,label) |> 
+    summarize(n.cells = n()) |> 
+    knitr::kable()
+
+ref_full$label <- md$label
+
 ```
+
+
 
 ## Xenium panel
 
@@ -88,10 +155,9 @@ After subsetting, there are `r nrow(ref_subset)` genes from the xenium panel in 
 paste0(setdiff(feat_xenium, rownames(ref_subset)), collapse = ", ")
 ```
 
-
 ```{r}
 #| eval: false
 ### save reference scRNA-seq data
-qs_save(ref_full, "data/reference_scRNAseq_full.qs")
-qs_save(ref_subset, "data/reference_scRNAseq_subset.qs")
+qs_save(ref_full, "data/reference_scRNAseq_full_labeled.qs")
+qs_save(ref_subset, "data/reference_scRNAseq_subset_labeled.qs")
 ```
